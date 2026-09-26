@@ -2,13 +2,13 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { signOut } from "firebase/auth";
+import { onAuthStateChanged, signOut, User } from "firebase/auth";
 import {
   collection,
   doc,
   getDocs,
-  orderBy,
   query,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { useEffect, useState } from "react";
@@ -18,6 +18,9 @@ type Tournament = {
   id: string;
   name: string;
   location?: string;
+  organizerId?: string;
+  organizerName?: string;
+  organizers?: string[];
   createdAt?: unknown;
 };
 
@@ -411,12 +414,29 @@ function RandomPairingModal({
 
 export default function Dashboard() {
   const router = useRouter();
-  const [tournaments, setTournaments] = useState<Tournament[]>([]);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [myTournaments, setMyTournaments] = useState<Tournament[]>([]);
+  const [invitedTournaments, setInvitedTournaments] = useState<Tournament[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [tournamentToDelete, setTournamentToDelete] = useState<Tournament | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPairingModalOpen, setIsPairingModalOpen] = useState<boolean>(false);
+
+  // Subscribe to Firebase auth state changes
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      if (user) {
+        void loadTournaments(user);
+      } else {
+        setMyTournaments([]);
+        setInvitedTournaments([]);
+        setIsLoading(false);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   async function handleLogout() {
     try {
@@ -427,26 +447,66 @@ export default function Dashboard() {
     }
   }
 
-  async function loadTournaments() {
+  // Fetch tournaments created by user and tournaments where user's UID or Email is in "organizers"
+  async function loadTournaments(user: User) {
     setIsLoading(true);
     try {
-      const q = query(
-        collection(db, "tournaments"),
-        orderBy("createdAt", "desc" as any)
+      const tournamentsRef = collection(db, "tournaments");
+
+      // Query 1: Tournaments primary-owned by current user
+      const myQuery = query(tournamentsRef, where("organizerId", "==", user.uid));
+
+      // Query 2: Tournaments where user's UID is in the "organizers" array
+      const invitedUidQuery = query(
+        tournamentsRef,
+        where("organizers", "array-contains", user.uid)
       );
-      const snap = await getDocs(q);
-      setTournaments(
-        snap.docs.map((docItem) => ({
-          id: docItem.id,
-          ...(docItem.data() as any),
-        }))
-      );
+
+      const promises: Promise<any>[] = [
+        getDocs(myQuery),
+        getDocs(invitedUidQuery),
+      ];
+
+      // Query 3: Tournaments where user's Email is in the "organizers" array
+      if (user.email) {
+        const invitedEmailQuery = query(
+          tournamentsRef,
+          where("organizers", "array-contains", user.email)
+        );
+        promises.push(getDocs(invitedEmailQuery));
+      }
+
+      const snapshots = await Promise.all(promises);
+
+      // Owned tournaments
+      const owned = snapshots[0].docs.map((docItem: any) => ({
+        id: docItem.id,
+        ...(docItem.data() as any),
+      }));
+
+      // Invited tournaments (filtering out ones where the user is already primary organizerId)
+      const invitedMap = new Map<string, Tournament>();
+
+      for (let i = 1; i < snapshots.length; i++) {
+        snapshots[i].docs.forEach((docItem: any) => {
+          if (docItem.data().organizerId !== user.uid) {
+            invitedMap.set(docItem.id, {
+              id: docItem.id,
+              ...(docItem.data() as any),
+            });
+          }
+        });
+      }
+
+      setMyTournaments(owned);
+      setInvitedTournaments(Array.from(invitedMap.values()));
       setError(null);
     } catch (loadError) {
       const message =
         loadError instanceof Error
           ? loadError.message
           : "Unable to load tournaments.";
+
       setError(
         message.includes("auth/") || message.includes("apiKey")
           ? "Add your Firebase environment variables to load organizer data."
@@ -457,12 +517,8 @@ export default function Dashboard() {
     }
   }
 
-  useEffect(() => {
-    void loadTournaments();
-  }, []);
-
   async function confirmDeleteTournament() {
-    if (!tournamentToDelete) return;
+    if (!tournamentToDelete || !currentUser) return;
     const tournamentId = tournamentToDelete.id;
 
     setDeletingId(tournamentId);
@@ -507,7 +563,7 @@ export default function Dashboard() {
       batch.delete(doc(db, "tournaments", tournamentId));
       await batch.commit();
       setTournamentToDelete(null);
-      await loadTournaments();
+      await loadTournaments(currentUser);
     } catch (deleteError) {
       const message =
         deleteError instanceof Error
@@ -523,10 +579,12 @@ export default function Dashboard() {
     }
   }
 
+  const totalEvents = myTournaments.length + invitedTournaments.length;
+
   return (
     <div className="min-h-screen bg-[#04130f] px-4 py-8 text-white md:px-8">
       <div className="mx-auto max-w-6xl space-y-8">
-        {/* Header */}
+        {/* Header with Logged-In User Information */}
         <header className="flex flex-col gap-4 rounded-3xl border border-slate-700/80 bg-slate-950/70 p-6 shadow-xl shadow-emerald-500/10 backdrop-blur-md md:flex-row md:items-center md:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.28em] text-emerald-300">
@@ -535,6 +593,25 @@ export default function Dashboard() {
             <h1 className="mt-1 text-3xl font-black text-white md:text-4xl">
               Tournament Dashboard
             </h1>
+
+            {/* Current User Badge */}
+            {currentUser && (
+              <div className="mt-3 flex items-center gap-2.5">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-400/20 text-xs font-bold text-emerald-300 border border-emerald-400/30">
+                  {currentUser.displayName
+                    ? currentUser.displayName.charAt(0).toUpperCase()
+                    : currentUser.email
+                    ? currentUser.email.charAt(0).toUpperCase()
+                    : "U"}
+                </div>
+                <div className="text-xs">
+                  <span className="text-slate-400">Logged in as </span>
+                  <span className="font-semibold text-slate-200">
+                    {currentUser.displayName || currentUser.email || "Authenticated User"}
+                  </span>
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -568,7 +645,7 @@ export default function Dashboard() {
           {[
             {
               label: "Live Events",
-              value: isLoading ? "..." : tournaments.length.toString(),
+              value: isLoading ? "..." : totalEvents.toString(),
             },
             { label: "Schedules", value: "Ready" },
             { label: "Courts", value: "Flexible" },
@@ -593,12 +670,88 @@ export default function Dashboard() {
           </div>
         ) : null}
 
+        {/* Invited Tournaments Section */}
+        {invitedTournaments.length > 0 && (
+          <section className="rounded-3xl border border-blue-500/30 bg-blue-950/20 p-5 md:p-6 backdrop-blur-md">
+            <div className="mb-6 flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-bold text-white">Invited Tournaments</h2>
+                <p className="text-xs text-slate-400 mt-1">Events where you are listed as an organizer</p>
+              </div>
+              <span className="text-sm font-medium text-blue-400">
+                {invitedTournaments.length} invited
+              </span>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {invitedTournaments.map((tournament) => (
+                <div
+                  key={tournament.id}
+                  className="flex flex-col justify-between rounded-2xl border border-blue-500/30 bg-gradient-to-br from-slate-900 to-slate-950 p-5 transition hover:border-blue-400/50 hover:shadow-lg hover:shadow-blue-500/10"
+                >
+                  <div>
+                    <div className="flex items-start justify-between gap-4">
+                      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-blue-400">
+                        Invited Event
+                      </p>
+                      <span className="rounded-full border border-blue-400/30 bg-blue-400/10 px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.2em] text-blue-200">
+                        Co-Organizer
+                      </span>
+                    </div>
+
+                    <h3 className="mt-2 text-xl font-bold text-white leading-tight">
+                      {tournament.name}
+                    </h3>
+
+                    <div className="mt-5 space-y-2 text-sm text-slate-300">
+                      <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                        <span className="text-slate-400">Primary Organizer</span>
+                        <span className="font-medium text-slate-200">
+                          {tournament.organizerName || "External Organizer"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between border-b border-slate-800/80 pb-2">
+                        <span className="text-slate-400">Location</span>
+                        <span className="font-medium text-slate-200">
+                          {tournament.location || "TBD"}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 flex items-center justify-between gap-2 border-t border-slate-800/80 pt-4">
+                    <Link
+                      href={`/organizer/tournament/${tournament.id}`}
+                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/30 px-3.5 py-2 text-xs font-semibold text-blue-200 hover:text-white transition"
+                    >
+                      <span>View &amp; Manage Event</span>
+                      <svg
+                        className="h-3.5 w-3.5"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        stroke="currentColor"
+                        strokeWidth={2.5}
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"
+                        />
+                      </svg>
+                    </Link>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
         {/* Main Tournaments Section */}
         <section className="rounded-3xl border border-slate-700/80 bg-slate-950/65 p-5 md:p-6 backdrop-blur-md">
           <div className="mb-6 flex items-center justify-between">
-            <h2 className="text-xl font-bold text-white">Your Tournaments</h2>
+            <h2 className="text-xl font-bold text-white">Your Created Tournaments</h2>
             <span className="text-sm font-medium text-slate-400">
-              {isLoading ? "Loading..." : `${tournaments.length} total`}
+              {isLoading ? "Loading..." : `${myTournaments.length} total`}
             </span>
           </div>
 
@@ -626,10 +779,10 @@ export default function Dashboard() {
                 </div>
               ))}
             </div>
-          ) : tournaments.length === 0 ? (
+          ) : myTournaments.length === 0 ? (
             /* Empty State */
             <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/40 p-12 text-center">
-              <p className="text-lg font-semibold text-white">No tournaments yet</p>
+              <p className="text-lg font-semibold text-white">No tournaments created yet</p>
               <p className="mt-1 text-sm text-slate-400">
                 Create your first event to start managing brackets, teams, and matches.
               </p>
@@ -637,7 +790,7 @@ export default function Dashboard() {
           ) : (
             /* Tournament Cards Grid */
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              {tournaments.map((tournament) => (
+              {myTournaments.map((tournament) => (
                 <div
                   key={tournament.id}
                   className="flex flex-col justify-between rounded-2xl border border-slate-700/80 bg-gradient-to-br from-slate-900 to-slate-950 p-5 transition hover:border-emerald-400/40 hover:shadow-lg hover:shadow-emerald-500/10"

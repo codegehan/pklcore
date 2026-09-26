@@ -10,7 +10,9 @@ import {
   onSnapshot,
   writeBatch,
   updateDoc,
+  arrayUnion
 } from "firebase/firestore";
+import { getAuth, onAuthStateChanged } from "firebase/auth";
 import { db } from "@/lib/firebase";
 
 // ==========================================
@@ -56,6 +58,8 @@ export interface Tournament {
   name: string;
   courtsCount?: number;
   publicViewKey?: string;
+  organizers?: string[];
+  organizerEmail?: string; // Tracks event creator
 }
 
 export interface TeamStanding {
@@ -463,6 +467,7 @@ export default function TournamentDetailPage() {
   const [tournament, setTournament] = useState<Tournament | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
   const [matches, setMatches] = useState<Record<string, Match[]>>({});
+  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
 
   const [loading, setLoading] = useState<boolean>(true);
   const [isSaving, setIsSaving] = useState<boolean>(false);
@@ -470,6 +475,9 @@ export default function TournamentDetailPage() {
   const [savedMatchId, setSavedMatchId] = useState<string | null>(null);
   const [isGeneratingAll, setIsGeneratingAll] = useState<boolean>(false);
   const [rebuildingCategoryId, setRebuildingCategoryId] = useState<string | null>(null);
+
+  const [newOrganizerEmail, setNewOrganizerEmail] = useState<string>("");
+  const [isInvitingOrganizer, setIsInvitingOrganizer] = useState<boolean>(false);
 
   const [activeTab, setActiveTab] = useState<"categories" | "brackets" | "standings" | "matches">(
     initialTab
@@ -487,6 +495,21 @@ export default function TournamentDetailPage() {
 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Track Firebase Auth Current User
+  useEffect(() => {
+    const auth = getAuth();
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUserEmail(user?.email?.toLowerCase() || null);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Check if current logged-in user is creator of tournament
+  const isCreator =
+    Boolean(currentUserEmail) &&
+    Boolean(tournament?.organizerEmail) &&
+    currentUserEmail === tournament?.organizerEmail?.toLowerCase();
 
   useEffect(() => {
     if (!error && !notice) return;
@@ -609,6 +632,45 @@ export default function TournamentDetailPage() {
     };
   }, [id]);
 
+  async function handleInviteOrganizer(e: React.FormEvent) {
+    e.preventDefault();
+
+    if (!isCreator) {
+      setError("Only the event creator can invite new organizers.");
+      return;
+    }
+
+    const email = newOrganizerEmail.trim().toLowerCase();
+
+    if (!email) return;
+
+    try {
+      setIsInvitingOrganizer(true);
+      const tournamentRef = doc(db, "tournaments", id);
+
+      await updateDoc(tournamentRef, {
+        organizers: arrayUnion(email),
+      });
+
+      setTournament((prev) =>
+        prev
+          ? {
+              ...prev,
+              organizers: Array.from(new Set([...(prev.organizers || []), email])),
+            }
+          : null
+      );
+
+      setNewOrganizerEmail("");
+      setNotice(`Organizer "${email}" added successfully!`);
+      setError(null);
+    } catch (err) {
+      setError(friendlyError("Failed to add organizer.", err));
+    } finally {
+      setIsInvitingOrganizer(false);
+    }
+  }
+
   // TEAM MANAGEMENT FUNCTIONS
 
   async function handleAddBatchTeams(categoryId: string) {
@@ -678,141 +740,141 @@ export default function TournamentDetailPage() {
 
   // GENERAL MATCH GENERATION
 
-async function generateAllMatches() {
-  if (categories.length === 0) {
-    setError("No categories found to generate matches.");
-    return;
-  }
-
-  for (const cat of categories) {
-    const teams = cat.teamNames ?? [];
-    if (teams.length < 2) {
-      setError(
-        `Cannot generate matches: Category "${cat.name}" needs at least 2 teams added.`
-      );
+  async function generateAllMatches() {
+    if (categories.length === 0) {
+      setError("No categories found to generate matches.");
       return;
     }
 
-    if ((cat.type ?? "single") === "roundrobin") {
-      const normalizedBracketCount = cat.bracketCount ?? 1;
-      const normalizedTopAdvance = cat.topAdvance ?? 2;
-      const normalizedKnockoutStart = cat.knockoutStart ?? "quarterfinals";
-      const normalizedMatchupStrategy = cat.matchupStrategy ?? "cross";
-
-      if (!normalizedBracketCount || normalizedBracketCount < 1) {
-        setError(
-          `Cannot generate matches: Category "${cat.name}" requires at least 1 group configured.`
-        );
-        return;
-      }
-      if (!normalizedTopAdvance || normalizedTopAdvance < 1) {
-        setError(
-          `Cannot generate matches: Category "${cat.name}" requires top advance count specified.`
-        );
-        return;
-      }
-
-      cat.knockoutStart = normalizedKnockoutStart;
-      cat.matchupStrategy = normalizedMatchupStrategy;
-    }
-  }
-
-  setIsGeneratingAll(true);
-  setError(null);
-  setNotice(null);
-
-  try {
-    const newMatchesMap: Record<string, Match[]> = {};
-    const updatedCategoriesList: Category[] = [];
-    const batch = writeBatch(db);
-
     for (const cat of categories) {
-      const teamList = cat.teamNames ?? [];
-      const catType = cat.type ?? "single";
-
-      const rawGroups = buildGroups(teamList, cat.bracketCount ?? 1);
-      const generatedGroups = rawGroups.map((group) => ({
-        name: group.name,
-        members: group.teams,
-      }));
-
-      let catGeneratedMatches: Match[] = [];
-
-      if (catType === "roundrobin") {
-        // Build Round Robin matches
-        const rrMatches = buildRoundRobinMatchesByGroup(rawGroups, cat.id, cat.name);
-
-        // Automatically build Knockout Bracket Placeholders from category setup
-        const knockoutMatches = generateKnockoutBracketPlaceholders(
-          cat.knockoutStart ?? "quarterfinals",
-          cat.matchupStrategy ?? "cross",
-          generatedGroups,
-          rrMatches,
-          cat.topAdvance ?? 2,
-          cat.id,
-          cat.name
+      const teams = cat.teamNames ?? [];
+      if (teams.length < 2) {
+        setError(
+          `Cannot generate matches: Category "${cat.name}" needs at least 2 teams added.`
         );
-
-        catGeneratedMatches = [...rrMatches, ...knockoutMatches];
-      } else {
-        catGeneratedMatches = buildMatchList(teamList, catType, cat.id, cat.name);
+        return;
       }
 
-      newMatchesMap[cat.id] = catGeneratedMatches;
-      updatedCategoriesList.push({ ...cat, bracketGroups: generatedGroups });
+      if ((cat.type ?? "single") === "roundrobin") {
+        const normalizedBracketCount = cat.bracketCount ?? 1;
+        const normalizedTopAdvance = cat.topAdvance ?? 2;
+        const normalizedKnockoutStart = cat.knockoutStart ?? "quarterfinals";
+        const normalizedMatchupStrategy = cat.matchupStrategy ?? "cross";
 
-      const categoryRef = doc(db, "tournaments", id, "categories", cat.id);
-      batch.update(categoryRef, { bracketGroups: generatedGroups });
+        if (!normalizedBracketCount || normalizedBracketCount < 1) {
+          setError(
+            `Cannot generate matches: Category "${cat.name}" requires at least 1 group configured.`
+          );
+          return;
+        }
+        if (!normalizedTopAdvance || normalizedTopAdvance < 1) {
+          setError(
+            `Cannot generate matches: Category "${cat.name}" requires top advance count specified.`
+          );
+          return;
+        }
 
-      const existingMatchesSnap = await getDocs(
-        collection(db, "tournaments", id, "categories", cat.id, "matches")
-      );
-      existingMatchesSnap.docs.forEach((mDoc) => {
-        batch.delete(mDoc.ref);
-      });
+        cat.knockoutStart = normalizedKnockoutStart;
+        cat.matchupStrategy = normalizedMatchupStrategy;
+      }
     }
 
-    const courtsCount = tournament?.courtsCount ?? 4;
-    const scheduledMatchesMap = assignSlotsAndCourtsInterleaved(
-      updatedCategoriesList,
-      newMatchesMap,
-      courtsCount
-    );
+    setIsGeneratingAll(true);
+    setError(null);
+    setNotice(null);
 
-    const newDraftScores: Record<string, { scoreA: string; scoreB: string }> = {};
+    try {
+      const newMatchesMap: Record<string, Match[]> = {};
+      const updatedCategoriesList: Category[] = [];
+      const batch = writeBatch(db);
 
-    for (const cat of updatedCategoriesList) {
-      const catMatches = scheduledMatchesMap[cat.id] || [];
-      const matchesColRef = collection(db, "tournaments", id, "categories", cat.id, "matches");
+      for (const cat of categories) {
+        const teamList = cat.teamNames ?? [];
+        const catType = cat.type ?? "single";
 
-      for (const m of catMatches) {
-        const matchRef = m.id ? doc(matchesColRef, m.id) : doc(matchesColRef);
-        m.id = matchRef.id;
-        newDraftScores[m.id] = { scoreA: "", scoreB: "" };
-        batch.set(matchRef, {
-          group: m.group || null,
-          stageName: m.stageName || null,
-          roundIndex: m.roundIndex ?? null,
-          matchIndex: m.matchIndex ?? null,
-          teamA: m.teamA,
-          teamB: m.teamB,
-          scoreA: m.scoreA,
-          scoreB: m.scoreB,
-          court: m.court,
-          slot: m.slot,
-          isComplete: m.isComplete,
+        const rawGroups = buildGroups(teamList, cat.bracketCount ?? 1);
+        const generatedGroups = rawGroups.map((group) => ({
+          name: group.name,
+          members: group.teams,
+        }));
+
+        let catGeneratedMatches: Match[] = [];
+
+        if (catType === "roundrobin") {
+          // Build Round Robin matches
+          const rrMatches = buildRoundRobinMatchesByGroup(rawGroups, cat.id, cat.name);
+
+          // Automatically build Knockout Bracket Placeholders from category setup
+          const knockoutMatches = generateKnockoutBracketPlaceholders(
+            cat.knockoutStart ?? "quarterfinals",
+            cat.matchupStrategy ?? "cross",
+            generatedGroups,
+            rrMatches,
+            cat.topAdvance ?? 2,
+            cat.id,
+            cat.name
+          );
+
+          catGeneratedMatches = [...rrMatches, ...knockoutMatches];
+        } else {
+          catGeneratedMatches = buildMatchList(teamList, catType, cat.id, cat.name);
+        }
+
+        newMatchesMap[cat.id] = catGeneratedMatches;
+        updatedCategoriesList.push({ ...cat, bracketGroups: generatedGroups });
+
+        const categoryRef = doc(db, "tournaments", id, "categories", cat.id);
+        batch.update(categoryRef, { bracketGroups: generatedGroups });
+
+        const existingMatchesSnap = await getDocs(
+          collection(db, "tournaments", id, "categories", cat.id, "matches")
+        );
+        existingMatchesSnap.docs.forEach((mDoc) => {
+          batch.delete(mDoc.ref);
         });
       }
-    }
 
-    await batch.commit();
-    setNotice("Successfully generated all matches across all categories!");
-  } catch (genError) {
-    setError(friendlyError("Failed to generate tournament matches.", genError));
-  } finally {
-    setIsGeneratingAll(false);
+      const courtsCount = tournament?.courtsCount ?? 4;
+      const scheduledMatchesMap = assignSlotsAndCourtsInterleaved(
+        updatedCategoriesList,
+        newMatchesMap,
+        courtsCount
+      );
+
+      const newDraftScores: Record<string, { scoreA: string; scoreB: string }> = {};
+
+      for (const cat of updatedCategoriesList) {
+        const catMatches = scheduledMatchesMap[cat.id] || [];
+        const matchesColRef = collection(db, "tournaments", id, "categories", cat.id, "matches");
+
+        for (const m of catMatches) {
+          const matchRef = m.id ? doc(matchesColRef, m.id) : doc(matchesColRef);
+          m.id = matchRef.id;
+          newDraftScores[m.id] = { scoreA: "", scoreB: "" };
+          batch.set(matchRef, {
+            group: m.group || null,
+            stageName: m.stageName || null,
+            roundIndex: m.roundIndex ?? null,
+            matchIndex: m.matchIndex ?? null,
+            teamA: m.teamA,
+            teamB: m.teamB,
+            scoreA: m.scoreA,
+            scoreB: m.scoreB,
+            court: m.court,
+            slot: m.slot,
+            isComplete: m.isComplete,
+          });
+        }
+      }
+
+      await batch.commit();
+      setNotice("Successfully generated all matches across all categories!");
+    } catch (genError) {
+      setError(friendlyError("Failed to generate tournament matches.", genError));
+    } finally {
+      setIsGeneratingAll(false);
+    }
   }
-}
 
   // KNOCKOUT STAGE GENERATION
 
@@ -977,14 +1039,14 @@ async function generateAllMatches() {
 
   // Filter out incomplete/placeholder teams
   const allTournamentMatches: Match[] = Object.values(matches)
-  .flat()
-  .sort((a, b) => {
-    if (a.isComplete !== b.isComplete) {
-      return a.isComplete ? 1 : -1;
-    }
-    if ((a.slot ?? 0) !== (b.slot ?? 0)) return (a.slot ?? 0) - (b.slot ?? 0);
-    return (a.court ?? 0) - (b.court ?? 0);
-  });
+    .flat()
+    .sort((a, b) => {
+      if (a.isComplete !== b.isComplete) {
+        return a.isComplete ? 1 : -1;
+      }
+      if ((a.slot ?? 0) !== (b.slot ?? 0)) return (a.slot ?? 0) - (b.slot ?? 0);
+      return (a.court ?? 0) - (b.court ?? 0);
+    });
 
   // Unique ordered list of Knockout Stage Names
   const knockoutStageNames: string[] = [];
@@ -1159,6 +1221,59 @@ async function generateAllMatches() {
               </div>
             );
           })}
+        </div>
+      </section>
+        
+      {/* Organizer Invitation Section */}
+      <section className="mb-8 rounded-xl border border-slate-800 bg-slate-900/50 p-5">
+        <h2 className="text-base font-bold text-white mb-1">Tournament Organizers</h2>
+        {isCreator ? (
+          <>
+            <p className="text-xs text-slate-400 mb-4">
+              Invite additional organizers to help manage categories, schedule matches, and record scores.
+            </p>
+
+            <form onSubmit={handleInviteOrganizer} className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-4">
+              <input
+                type="email"
+                placeholder="organizer@example.com"
+                value={newOrganizerEmail}
+                onChange={(e) => setNewOrganizerEmail(e.target.value)}
+                className="flex-1 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-emerald-500 focus:outline-none"
+              />
+              <button
+                type="submit"
+                disabled={isInvitingOrganizer || !newOrganizerEmail.trim()}
+                className="bg-emerald-500 text-slate-950 font-semibold px-4 py-2 rounded-lg text-xs hover:bg-emerald-400 transition disabled:opacity-50 flex items-center justify-center gap-1"
+              >
+                {isInvitingOrganizer ? "Inviting..." : "Add Organizer"}
+              </button>
+            </form>
+          </>
+        ) : (
+          <p className="text-xs text-slate-400 mb-4">
+            Only the tournament creator can invite new organizers.
+          </p>
+        )}
+
+        <div>
+          <span className="text-xs font-semibold text-slate-400 block mb-2">
+            Current Organizers ({tournament?.organizers?.length || 0})
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {tournament?.organizers && tournament.organizers.length > 0 ? (
+              tournament.organizers.map((email) => (
+                <span
+                  key={email}
+                  className="inline-flex items-center bg-slate-950 border border-slate-800 text-slate-300 text-xs px-2.5 py-1 rounded-md font-mono"
+                >
+                  {email}
+                </span>
+              ))
+            ) : (
+              <p className="text-xs italic text-slate-500">No additional organizers added yet.</p>
+            )}
+          </div>
         </div>
       </section>
 

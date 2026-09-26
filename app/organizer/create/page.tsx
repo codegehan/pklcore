@@ -1,5 +1,6 @@
 "use client";
 
+import { onAuthStateChanged, User } from "firebase/auth";
 import {
   addDoc,
   collection,
@@ -10,8 +11,8 @@ import {
 } from "firebase/firestore";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { db } from "../../../lib/firebase";
+import { useEffect, useState } from "react";
+import { auth, db } from "../../../lib/firebase";
 
 type EliminationRound = "64" | "32" | "16" | "quarter" | "semi" | "final";
 
@@ -75,6 +76,8 @@ async function getUniquePublicViewKey() {
 }
 
 export default function CreateTournament() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [organizerName, setOrganizerName] = useState("");
   const [name, setName] = useState("");
   const [location, setLocation] = useState("");
   const [courtsCount, setCourtsCount] = useState(3);
@@ -84,6 +87,17 @@ export default function CreateTournament() {
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
+
+  // Listen for auth state changes to grab the logged-in user details
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      if (user) {
+        setOrganizerName(user.displayName || user.email || "");
+      }
+    });
+    return () => unsubscribe();
+  }, []);
 
   function updateCategory(index: number, patch: Partial<Category>) {
     setCategories((current) =>
@@ -149,6 +163,10 @@ export default function CreateTournament() {
         autoAssignCourts: Boolean(autoAssignCourts),
         enableThirdPlaceMatch: Boolean(enableThirdPlaceMatch),
         publicViewKey,
+        // Organizer / Creator details
+        organizerId: currentUser?.uid || null,
+        organizerEmail: currentUser?.email || null,
+        organizerName: organizerName.trim() || currentUser?.displayName || currentUser?.email || "Unknown Organizer",
         createdAt: serverTimestamp(),
       });
 
@@ -211,7 +229,7 @@ export default function CreateTournament() {
         >
           {/* General Tournament Configuration */}
           <div className="space-y-4">
-            <h2 className="text-lg font-bold text-emerald-300 uppercase tracking-wider text-xs">
+            <h2 className="text-xs font-bold uppercase tracking-wider text-emerald-300">
               General Info & Scheduling
             </h2>
             <div className="grid gap-5 md:grid-cols-3">
@@ -242,13 +260,27 @@ export default function CreateTournament() {
                 />
               </label>
 
-              <label className="block md:col-span-3">
+              <label className="block md:col-span-2">
                 <span className="mb-2 block text-sm text-slate-300">Location</span>
                 <input
                   value={location}
                   onChange={(event) => setLocation(event.target.value)}
                   className="w-full rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20"
                   placeholder="Riverside Pickleball Club"
+                />
+              </label>
+
+              {/* Organizer / Creator Input Field */}
+              <label className="block">
+                <span className="mb-2 block text-sm text-slate-300">
+                  Organizer / Host Name
+                </span>
+                <input
+                  value={organizerName}
+                  onChange={(event) => setOrganizerName(event.target.value)}
+                  className="w-full rounded-2xl border border-slate-700 bg-slate-900/80 px-4 py-3 text-base text-white outline-none transition focus:border-emerald-400 focus:ring-2 focus:ring-emerald-400/20"
+                  placeholder="John Doe or Club Name"
+                  disabled
                 />
               </label>
             </div>
@@ -332,12 +364,12 @@ export default function CreateTournament() {
               {categories.map((category, index) => (
                 <div
                   key={category.id}
-                  className="rounded-3xl border border-slate-700 bg-slate-900/40 p-4 md:p-6 space-y-4"
+                  className="space-y-4 rounded-3xl border border-slate-700 bg-slate-900/40 p-4 md:p-6"
                 >
                   <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                     {/* Name */}
                     <label className="block">
-                      <span className="mb-2 block text-xs font-semibold text-slate-300 uppercase">
+                      <span className="mb-2 block text-xs font-semibold uppercase text-slate-300">
                         Category Name
                       </span>
                       <input
@@ -351,7 +383,7 @@ export default function CreateTournament() {
 
                     {/* Format */}
                     <label className="block">
-                      <span className="mb-2 block text-xs font-semibold text-slate-300 uppercase">
+                      <span className="mb-2 block text-xs font-semibold uppercase text-slate-300">
                         Format
                       </span>
                       <select
@@ -369,9 +401,9 @@ export default function CreateTournament() {
                       </select>
                     </label>
 
-                    {/* Target Elimination Round */}
+                    {/* Target Elimination Round Stage */}
                     <label className="block">
-                      <span className="mb-2 block text-xs font-semibold text-slate-300 uppercase">
+                      <span className="mb-2 block text-xs font-semibold uppercase text-slate-300">
                         Starting Round Stage
                       </span>
                       <select
@@ -394,7 +426,7 @@ export default function CreateTournament() {
 
                     {/* Target Score */}
                     <label className="block">
-                      <span className="mb-2 block text-xs font-semibold text-slate-300 uppercase">
+                      <span className="mb-2 block text-xs font-semibold uppercase text-slate-300">
                         Points To Win
                       </span>
                       <select
@@ -414,7 +446,7 @@ export default function CreateTournament() {
                   </div>
 
                   {/* Secondary Parameters */}
-                  <div className="grid gap-4 pt-2 md:grid-cols-3 border-t border-slate-800/80">
+                  <div className="grid gap-4 border-t border-slate-800/80 pt-2 md:grid-cols-3">
                     <label className="block">
                       <span className="mb-1 block text-xs text-slate-400">
                         Groups (Round Robin)
@@ -495,7 +527,7 @@ export default function CreateTournament() {
                     </label>
 
                     <div className="flex items-center justify-between pt-4">
-                      <label className="flex items-center gap-2 cursor-pointer text-xs text-slate-300">
+                      <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-300">
                         <input
                           type="checkbox"
                           checked={category.winByTwo}
@@ -526,7 +558,7 @@ export default function CreateTournament() {
           <button
             type="submit"
             disabled={isSubmitting}
-            className="inline-flex w-full md:w-auto items-center justify-center rounded-full bg-emerald-400 px-8 py-3.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70"
+            className="inline-flex w-full items-center justify-center rounded-full bg-emerald-400 px-8 py-3.5 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-70 md:w-auto"
           >
             {isSubmitting ? "Creating Tournament..." : "Create Tournament"}
           </button>
