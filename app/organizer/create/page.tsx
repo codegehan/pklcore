@@ -1,6 +1,13 @@
 "use client";
 
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import {
+  addDoc,
+  collection,
+  getDocs,
+  query,
+  serverTimestamp,
+  where,
+} from "firebase/firestore";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -14,6 +21,8 @@ type Category = {
   type: "single" | "double" | "roundrobin";
   topAdvance: number;
   bracketCount: number;
+  knockoutStart: "finals" | "semifinals" | "quarterfinals";
+  matchupStrategy: "cross" | "adjacent";
   startingRound: EliminationRound;
   pointsToWin: number;
   winByTwo: boolean;
@@ -27,12 +36,43 @@ const defaultCategories: Category[] = [
     type: "single",
     topAdvance: 1,
     bracketCount: 1,
+    knockoutStart: "quarterfinals",
+    matchupStrategy: "cross",
     startingRound: "16",
     pointsToWin: 11,
     winByTwo: true,
     autoAssignCourtsOverride: true,
   },
 ];
+
+const PUBLIC_VIEW_KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function generatePublicViewKey(length = 7) {
+  let key = "";
+
+  for (let i = 0; i < length; i += 1) {
+    const index = Math.floor(Math.random() * PUBLIC_VIEW_KEY_ALPHABET.length);
+    key += PUBLIC_VIEW_KEY_ALPHABET[index];
+  }
+
+  return key;
+}
+
+async function getUniquePublicViewKey() {
+  let candidate = generatePublicViewKey();
+
+  while (true) {
+    const existing = await getDocs(
+      query(collection(db, "tournaments"), where("publicViewKey", "==", candidate))
+    );
+
+    if (existing.empty) {
+      return candidate;
+    }
+
+    candidate = generatePublicViewKey();
+  }
+}
 
 export default function CreateTournament() {
   const [name, setName] = useState("");
@@ -62,6 +102,8 @@ export default function CreateTournament() {
         type: "single",
         topAdvance: 1,
         bracketCount: 1,
+        knockoutStart: "quarterfinals",
+        matchupStrategy: "cross",
         startingRound: "16",
         pointsToWin: 11,
         winByTwo: true,
@@ -98,12 +140,15 @@ export default function CreateTournament() {
     setIsSubmitting(true);
 
     try {
+      const publicViewKey = await getUniquePublicViewKey();
+
       const docRef = await addDoc(collection(db, "tournaments"), {
         name: name.trim(),
         location: location.trim(),
         courtsCount: Number(courtsCount),
         autoAssignCourts: Boolean(autoAssignCourts),
         enableThirdPlaceMatch: Boolean(enableThirdPlaceMatch),
+        publicViewKey,
         createdAt: serverTimestamp(),
       });
 
@@ -113,6 +158,8 @@ export default function CreateTournament() {
           type: category.type,
           topAdvance: category.topAdvance,
           bracketCount: Math.max(1, Math.min(26, Number(category.bracketCount) || 1)),
+          knockoutStart: category.knockoutStart || "quarterfinals",
+          matchupStrategy: category.matchupStrategy || "cross",
           startingRound: category.startingRound,
           pointsToWin: category.pointsToWin,
           winByTwo: category.winByTwo,
@@ -406,6 +453,45 @@ export default function CreateTournament() {
                         }
                         className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none disabled:opacity-40"
                       />
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-1 block text-xs text-slate-400">
+                        KO Stage Start
+                      </span>
+                      <select
+                        value={category.knockoutStart}
+                        disabled={category.type !== "roundrobin"}
+                        onChange={(event) =>
+                          updateCategory(index, {
+                            knockoutStart: event.target.value as Category["knockoutStart"],
+                          })
+                        }
+                        className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none disabled:opacity-40"
+                      >
+                        <option value="finals">Finals</option>
+                        <option value="semifinals">Semifinals</option>
+                        <option value="quarterfinals">Quarterfinals</option>
+                      </select>
+                    </label>
+
+                    <label className="block">
+                      <span className="mb-1 block text-xs text-slate-400">
+                        KO Matchup
+                      </span>
+                      <select
+                        value={category.matchupStrategy}
+                        disabled={category.type !== "roundrobin"}
+                        onChange={(event) =>
+                          updateCategory(index, {
+                            matchupStrategy: event.target.value as Category["matchupStrategy"],
+                          })
+                        }
+                        className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-white outline-none disabled:opacity-40"
+                      >
+                        <option value="cross">Cross</option>
+                        <option value="adjacent">Adjacent</option>
+                      </select>
                     </label>
 
                     <div className="flex items-center justify-between pt-4">

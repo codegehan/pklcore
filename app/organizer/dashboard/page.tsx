@@ -1,6 +1,8 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { signOut } from "firebase/auth";
 import {
   collection,
   doc,
@@ -10,7 +12,7 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { useEffect, useState } from "react";
-import { db } from "../../../lib/firebase";
+import { auth, db } from "../../../lib/firebase";
 
 type Tournament = {
   id: string;
@@ -408,12 +410,22 @@ function RandomPairingModal({
 // ==========================================
 
 export default function Dashboard() {
+  const router = useRouter();
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [tournamentToDelete, setTournamentToDelete] = useState<Tournament | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPairingModalOpen, setIsPairingModalOpen] = useState<boolean>(false);
+
+  async function handleLogout() {
+    try {
+      await signOut(auth);
+      router.push("/organizer");
+    } catch (logoutError) {
+      console.error("Logout error:", logoutError);
+    }
+  }
 
   async function loadTournaments() {
     setIsLoading(true);
@@ -525,7 +537,7 @@ export default function Dashboard() {
             </h1>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
               onClick={() => setIsPairingModalOpen(true)}
@@ -540,6 +552,14 @@ export default function Dashboard() {
             >
               + Create Tournament
             </Link>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="inline-flex items-center justify-center rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm font-semibold text-rose-300 transition hover:bg-rose-500/20 active:scale-95"
+            >
+              Log out
+            </button>
           </div>
         </header>
 

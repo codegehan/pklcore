@@ -55,6 +55,7 @@ export interface Tournament {
   id: string;
   name: string;
   courtsCount?: number;
+  publicViewKey?: string;
 }
 
 export interface TeamStanding {
@@ -95,7 +96,11 @@ function buildGroups(teams: string[], groupCount: number): Group[] {
   return groups;
 }
 
-function buildRoundRobinMatchesByGroup(groups: Group[], categoryId: string, categoryName: string): Match[] {
+function buildRoundRobinMatchesByGroup(
+  groups: Group[],
+  categoryId: string,
+  categoryName: string
+): Match[] {
   const matches: Match[] = [];
 
   groups.forEach((group) => {
@@ -122,7 +127,12 @@ function buildRoundRobinMatchesByGroup(groups: Group[], categoryId: string, cate
   return matches;
 }
 
-function buildMatchList(teams: string[], type: string, categoryId: string, categoryName: string): Match[] {
+function buildMatchList(
+  teams: string[],
+  type: string,
+  categoryId: string,
+  categoryName: string
+): Match[] {
   const matches: Match[] = [];
   for (let i = 0; i < teams.length; i += 2) {
     if (teams[i + 1]) {
@@ -344,7 +354,7 @@ function generateKnockoutBracketPlaceholders(
 
   const knockoutMatches: Match[] = [];
   const numFirstRoundMatches = initialFirstRoundPairs.length;
-  
+
   let numRounds = Math.ceil(Math.log2(numFirstRoundMatches + 1));
   if (knockoutStart === "finals") numRounds = 1;
   else if (knockoutStart === "semifinals") numRounds = Math.max(numRounds, 2);
@@ -362,7 +372,7 @@ function generateKnockoutBracketPlaceholders(
 
   for (let r = 0; r < numRounds; r++) {
     const stageName = getStageName(r, numRounds);
-    
+
     for (let m = 0; m < matchesInRound; m++) {
       if (r === 0) {
         const pair = initialFirstRoundPairs[m];
@@ -447,7 +457,8 @@ export default function TournamentDetailPage() {
   const searchParams = useSearchParams();
   const id = params?.id as string;
 
-  const initialTab = (searchParams?.get("tab") as "categories" | "brackets" | "standings" | "matches") || "categories";
+  const initialTab =
+    (searchParams?.get("tab") as "categories" | "brackets" | "standings" | "matches") || "categories";
 
   const [tournament, setTournament] = useState<Tournament | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -460,19 +471,41 @@ export default function TournamentDetailPage() {
   const [isGeneratingAll, setIsGeneratingAll] = useState<boolean>(false);
   const [rebuildingCategoryId, setRebuildingCategoryId] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<"categories" | "brackets" | "standings" | "matches">(initialTab);
-  
+  const [activeTab, setActiveTab] = useState<"categories" | "brackets" | "standings" | "matches">(
+    initialTab
+  );
+
   // MATCHES SUB-TAB STAGE SELECTOR (Round Robin by default)
   const [activeMatchStage, setActiveMatchStage] = useState<string>("Round Robin");
 
+  // STANDINGS CATEGORY TAB SELECTOR
+  const [activeStandingsCatId, setActiveStandingsCatId] = useState<string>("");
+
+  // SHARE MODAL STATE
+  const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
+  const [copiedLink, setCopiedLink] = useState<boolean>(false);
+
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!error && !notice) return;
+
+    const timer = setTimeout(() => {
+      setError(null);
+      setNotice(null);
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [error, notice]);
 
   const [newTeamBatchInput, setNewTeamBatchInput] = useState<Record<string, string>>({});
   const [showKnockoutIncompleteError, setShowKnockoutIncompleteError] = useState<boolean>(false);
 
   // Local draft scores for match score updates
-  const [localScores, setLocalScores] = useState<Record<string, { scoreA: string; scoreB: string }>>({});
+  const [localScores, setLocalScores] = useState<
+    Record<string, { scoreA: string; scoreB: string }>
+  >({});
 
   // Real-Time Listeners for Firestore Data
   useEffect(() => {
@@ -500,7 +533,14 @@ export default function TournamentDetailPage() {
             const loadedCategories: Category[] = [];
 
             catSnap.docs.forEach((catDoc) => {
-              const catData = { id: catDoc.id, ...catDoc.data() } as Category;
+              const catData = {
+                id: catDoc.id,
+                ...catDoc.data(),
+                knockoutStart: catDoc.data().knockoutStart ?? "quarterfinals",
+                matchupStrategy: catDoc.data().matchupStrategy ?? "cross",
+                bracketCount: catDoc.data().bracketCount ?? 1,
+                topAdvance: catDoc.data().topAdvance ?? 2,
+              } as Category;
               loadedCategories.push(catData);
 
               // Set real-time listener for matches of each category
@@ -510,7 +550,12 @@ export default function TournamentDetailPage() {
                   (mSnap) => {
                     const catMatches = mSnap.docs.map((m) => {
                       const data = m.data() as Match;
-                      return { id: m.id, categoryId: catDoc.id, categoryName: catData.name, ...data };
+                      return {
+                        id: m.id,
+                        categoryId: catDoc.id,
+                        categoryName: catData.name,
+                        ...data,
+                      };
                     });
 
                     const updatedProgression = updateKnockoutBracketProgression(catMatches);
@@ -525,8 +570,10 @@ export default function TournamentDetailPage() {
                       catMatches.forEach((m) => {
                         if (m.id && !draft[m.id]) {
                           draft[m.id] = {
-                            scoreA: m.scoreA !== null && m.scoreA !== undefined ? String(m.scoreA) : "",
-                            scoreB: m.scoreB !== null && m.scoreB !== undefined ? String(m.scoreB) : "",
+                            scoreA:
+                              m.scoreA !== null && m.scoreA !== undefined ? String(m.scoreA) : "",
+                            scoreB:
+                              m.scoreB !== null && m.scoreB !== undefined ? String(m.scoreB) : "",
                           };
                         }
                       });
@@ -538,6 +585,9 @@ export default function TournamentDetailPage() {
             });
 
             setCategories(loadedCategories);
+            if (loadedCategories.length > 0 && !activeStandingsCatId) {
+              setActiveStandingsCatId(loadedCategories[0].id);
+            }
             setLoading(false);
           },
           (err) => {
@@ -628,124 +678,141 @@ export default function TournamentDetailPage() {
 
   // GENERAL MATCH GENERATION
 
-  async function generateAllMatches() {
-    if (categories.length === 0) {
-      setError("No categories found to generate matches.");
+async function generateAllMatches() {
+  if (categories.length === 0) {
+    setError("No categories found to generate matches.");
+    return;
+  }
+
+  for (const cat of categories) {
+    const teams = cat.teamNames ?? [];
+    if (teams.length < 2) {
+      setError(
+        `Cannot generate matches: Category "${cat.name}" needs at least 2 teams added.`
+      );
       return;
     }
 
-    for (const cat of categories) {
-      const teams = cat.teamNames ?? [];
-      if (teams.length < 2) {
-        setError(`Cannot generate matches: Category "${cat.name}" needs at least 2 teams added.`);
+    if ((cat.type ?? "single") === "roundrobin") {
+      const normalizedBracketCount = cat.bracketCount ?? 1;
+      const normalizedTopAdvance = cat.topAdvance ?? 2;
+      const normalizedKnockoutStart = cat.knockoutStart ?? "quarterfinals";
+      const normalizedMatchupStrategy = cat.matchupStrategy ?? "cross";
+
+      if (!normalizedBracketCount || normalizedBracketCount < 1) {
+        setError(
+          `Cannot generate matches: Category "${cat.name}" requires at least 1 group configured.`
+        );
+        return;
+      }
+      if (!normalizedTopAdvance || normalizedTopAdvance < 1) {
+        setError(
+          `Cannot generate matches: Category "${cat.name}" requires top advance count specified.`
+        );
         return;
       }
 
-      if ((cat.type ?? "single") === "roundrobin") {
-        if (!cat.bracketCount || cat.bracketCount < 1) {
-          setError(`Cannot generate matches: Category "${cat.name}" requires at least 1 group configured.`);
-          return;
-        }
-        if (!cat.topAdvance || cat.topAdvance < 1) {
-          setError(`Cannot generate matches: Category "${cat.name}" requires top advance count specified.`);
-          return;
-        }
-        if (!cat.knockoutStart) {
-          setError(`Cannot generate matches: Category "${cat.name}" requires knockout stage start configured.`);
-          return;
-        }
-      }
-    }
-
-    setIsGeneratingAll(true);
-    setError(null);
-    setNotice(null);
-
-    try {
-      const newMatchesMap: Record<string, Match[]> = {};
-      const updatedCategoriesList: Category[] = [];
-      const batch = writeBatch(db);
-
-      for (const cat of categories) {
-        const teamList = cat.teamNames ?? [];
-        const catType = cat.type ?? "single";
-
-        const rawGroups = buildGroups(teamList, cat.bracketCount ?? 1);
-        const generatedGroups = rawGroups.map((group) => ({
-          name: group.name,
-          members: group.teams,
-        }));
-
-        let catGeneratedMatches: Match[] = [];
-
-        if (catType === "roundrobin") {
-          catGeneratedMatches = buildRoundRobinMatchesByGroup(rawGroups, cat.id, cat.name);
-        } else {
-          catGeneratedMatches = buildMatchList(teamList, catType, cat.id, cat.name);
-        }
-
-        newMatchesMap[cat.id] = catGeneratedMatches;
-        updatedCategoriesList.push({ ...cat, bracketGroups: generatedGroups });
-
-        const categoryRef = doc(db, "tournaments", id, "categories", cat.id);
-        batch.update(categoryRef, { bracketGroups: generatedGroups });
-
-        const existingMatchesSnap = await getDocs(
-          collection(db, "tournaments", id, "categories", cat.id, "matches")
-        );
-        existingMatchesSnap.docs.forEach((mDoc) => {
-          batch.delete(mDoc.ref);
-        });
-      }
-
-      const courtsCount = tournament?.courtsCount ?? 4;
-      const scheduledMatchesMap = assignSlotsAndCourtsInterleaved(
-        updatedCategoriesList,
-        newMatchesMap,
-        courtsCount
-      );
-
-      const newDraftScores: Record<string, { scoreA: string; scoreB: string }> = {};
-
-      for (const cat of updatedCategoriesList) {
-        const catMatches = scheduledMatchesMap[cat.id] || [];
-        const matchesColRef = collection(
-          db,
-          "tournaments",
-          id,
-          "categories",
-          cat.id,
-          "matches"
-        );
-
-        for (const m of catMatches) {
-          const matchRef = m.id ? doc(matchesColRef, m.id) : doc(matchesColRef);
-          m.id = matchRef.id;
-          newDraftScores[m.id] = { scoreA: "", scoreB: "" };
-          batch.set(matchRef, {
-            group: m.group || null,
-            stageName: m.stageName || null,
-            roundIndex: m.roundIndex ?? null,
-            matchIndex: m.matchIndex ?? null,
-            teamA: m.teamA,
-            teamB: m.teamB,
-            scoreA: m.scoreA,
-            scoreB: m.scoreB,
-            court: m.court,
-            slot: m.slot,
-            isComplete: m.isComplete,
-          });
-        }
-      }
-
-      await batch.commit();
-      setNotice("Successfully generated all matches across all categories!");
-    } catch (genError) {
-      setError(friendlyError("Failed to generate tournament matches.", genError));
-    } finally {
-      setIsGeneratingAll(false);
+      cat.knockoutStart = normalizedKnockoutStart;
+      cat.matchupStrategy = normalizedMatchupStrategy;
     }
   }
+
+  setIsGeneratingAll(true);
+  setError(null);
+  setNotice(null);
+
+  try {
+    const newMatchesMap: Record<string, Match[]> = {};
+    const updatedCategoriesList: Category[] = [];
+    const batch = writeBatch(db);
+
+    for (const cat of categories) {
+      const teamList = cat.teamNames ?? [];
+      const catType = cat.type ?? "single";
+
+      const rawGroups = buildGroups(teamList, cat.bracketCount ?? 1);
+      const generatedGroups = rawGroups.map((group) => ({
+        name: group.name,
+        members: group.teams,
+      }));
+
+      let catGeneratedMatches: Match[] = [];
+
+      if (catType === "roundrobin") {
+        // Build Round Robin matches
+        const rrMatches = buildRoundRobinMatchesByGroup(rawGroups, cat.id, cat.name);
+
+        // Automatically build Knockout Bracket Placeholders from category setup
+        const knockoutMatches = generateKnockoutBracketPlaceholders(
+          cat.knockoutStart ?? "quarterfinals",
+          cat.matchupStrategy ?? "cross",
+          generatedGroups,
+          rrMatches,
+          cat.topAdvance ?? 2,
+          cat.id,
+          cat.name
+        );
+
+        catGeneratedMatches = [...rrMatches, ...knockoutMatches];
+      } else {
+        catGeneratedMatches = buildMatchList(teamList, catType, cat.id, cat.name);
+      }
+
+      newMatchesMap[cat.id] = catGeneratedMatches;
+      updatedCategoriesList.push({ ...cat, bracketGroups: generatedGroups });
+
+      const categoryRef = doc(db, "tournaments", id, "categories", cat.id);
+      batch.update(categoryRef, { bracketGroups: generatedGroups });
+
+      const existingMatchesSnap = await getDocs(
+        collection(db, "tournaments", id, "categories", cat.id, "matches")
+      );
+      existingMatchesSnap.docs.forEach((mDoc) => {
+        batch.delete(mDoc.ref);
+      });
+    }
+
+    const courtsCount = tournament?.courtsCount ?? 4;
+    const scheduledMatchesMap = assignSlotsAndCourtsInterleaved(
+      updatedCategoriesList,
+      newMatchesMap,
+      courtsCount
+    );
+
+    const newDraftScores: Record<string, { scoreA: string; scoreB: string }> = {};
+
+    for (const cat of updatedCategoriesList) {
+      const catMatches = scheduledMatchesMap[cat.id] || [];
+      const matchesColRef = collection(db, "tournaments", id, "categories", cat.id, "matches");
+
+      for (const m of catMatches) {
+        const matchRef = m.id ? doc(matchesColRef, m.id) : doc(matchesColRef);
+        m.id = matchRef.id;
+        newDraftScores[m.id] = { scoreA: "", scoreB: "" };
+        batch.set(matchRef, {
+          group: m.group || null,
+          stageName: m.stageName || null,
+          roundIndex: m.roundIndex ?? null,
+          matchIndex: m.matchIndex ?? null,
+          teamA: m.teamA,
+          teamB: m.teamB,
+          scoreA: m.scoreA,
+          scoreB: m.scoreB,
+          court: m.court,
+          slot: m.slot,
+          isComplete: m.isComplete,
+        });
+      }
+    }
+
+    await batch.commit();
+    setNotice("Successfully generated all matches across all categories!");
+  } catch (genError) {
+    setError(friendlyError("Failed to generate tournament matches.", genError));
+  } finally {
+    setIsGeneratingAll(false);
+  }
+}
 
   // KNOCKOUT STAGE GENERATION
 
@@ -807,14 +874,7 @@ export default function TournamentDetailPage() {
 
       for (const cat of categories) {
         const catMatches = scheduledMatchesMap[cat.id] || [];
-        const matchesColRef = collection(
-          db,
-          "tournaments",
-          id,
-          "categories",
-          cat.id,
-          "matches"
-        );
+        const matchesColRef = collection(db, "tournaments", id, "categories", cat.id, "matches");
 
         for (const m of catMatches) {
           const matchRef = m.id ? doc(matchesColRef, m.id) : doc(matchesColRef);
@@ -917,19 +977,14 @@ export default function TournamentDetailPage() {
 
   // Filter out incomplete/placeholder teams
   const allTournamentMatches: Match[] = Object.values(matches)
-    .flat()
-    .filter((m) => {
-      const isTeamATBD = !m.teamA || m.teamA === "TBD" || m.teamA.toLowerCase().includes("1st ") || m.teamA.toLowerCase().includes("2nd ");
-      const isTeamBTBD = !m.teamB || m.teamB === "TBD" || m.teamB.toLowerCase().includes("1st ") || m.teamB.toLowerCase().includes("2nd ");
-      return !isTeamATBD && !isTeamBTBD;
-    })
-    .sort((a, b) => {
-      if (a.isComplete !== b.isComplete) {
-        return a.isComplete ? 1 : -1;
-      }
-      if ((a.slot ?? 0) !== (b.slot ?? 0)) return (a.slot ?? 0) - (b.slot ?? 0);
-      return (a.court ?? 0) - (b.court ?? 0);
-    });
+  .flat()
+  .sort((a, b) => {
+    if (a.isComplete !== b.isComplete) {
+      return a.isComplete ? 1 : -1;
+    }
+    if ((a.slot ?? 0) !== (b.slot ?? 0)) return (a.slot ?? 0) - (b.slot ?? 0);
+    return (a.court ?? 0) - (b.court ?? 0);
+  });
 
   // Unique ordered list of Knockout Stage Names
   const knockoutStageNames: string[] = [];
@@ -962,9 +1017,35 @@ export default function TournamentDetailPage() {
     return m.stageName?.toLowerCase() === activeMatchStage.toLowerCase();
   });
 
+  // Compute Courts layout based on tournament court count
+  const courtsCount = tournament?.courtsCount || 4;
+  const courtsArray = Array.from({ length: courtsCount }, (_, i) => i + 1);
+
+  // Active playing matches per court (pending matches with current lowest slot number)
+  const currentCourtMatches: Record<number, Match | undefined> = {};
+  courtsArray.forEach((courtNum) => {
+    const pendingCourtMatches = allTournamentMatches.filter(
+      (m) => m.court === courtNum && !m.isComplete
+    );
+    if (pendingCourtMatches.length > 0) {
+      pendingCourtMatches.sort((a, b) => (a.slot ?? 0) - (b.slot ?? 0));
+      currentCourtMatches[courtNum] = pendingCourtMatches[0];
+    }
+  });
+
+  const publicViewerPath = `/view/${tournament?.publicViewKey || id}`;
+  const viewerShareUrl =
+    typeof window !== "undefined" ? `${window.location.origin}${publicViewerPath}` : publicViewerPath;
+
+  const copyShareUrl = () => {
+    navigator.clipboard.writeText(viewerShareUrl);
+    setCopiedLink(true);
+    setTimeout(() => setCopiedLink(false), 2500);
+  };
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 p-4 md:p-6">
-      <header className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between border-b border-slate-800 pb-4">
+      <header className="mb-6 flex flex-col md:flex-row md:items-center md:justify-between border-b border-slate-800 pb-4 gap-4">
         <div>
           <button
             onClick={() => router.back()}
@@ -975,7 +1056,7 @@ export default function TournamentDetailPage() {
           <h1 className="text-2xl md:text-3xl font-bold text-white">{tournament?.name}</h1>
         </div>
 
-        <nav className="mt-4 md:mt-0 flex flex-wrap items-center gap-2">
+        <nav className="flex flex-wrap items-center gap-2">
           {(["categories", "brackets", "standings", "matches"] as const).map((tab) => (
             <button
               key={tab}
@@ -990,9 +1071,17 @@ export default function TournamentDetailPage() {
             </button>
           ))}
 
+          {/* Shareable Link Button for Viewers */}
+          <button
+            onClick={() => setIsShareModalOpen(true)}
+            className="px-3 py-1.5 md:py-2 text-xs font-semibold text-slate-950 bg-emerald-400 hover:bg-emerald-300 rounded-lg transition flex items-center gap-1.5 shadow"
+          >
+            <span>🔗 Share Viewer Link</span>
+          </button>
+
           {/* New Tab Opener */}
           <a
-            href={`/tournaments/${id}?tab=matches`}
+            href={`/organizer/tournament/${id}?tab=matches`}
             target="_blank"
             rel="noopener noreferrer"
             className="px-3 py-1.5 md:py-2 text-xs text-emerald-400 hover:text-emerald-300 bg-slate-900 hover:bg-slate-800 rounded-lg border border-emerald-500/30 transition flex items-center gap-1"
@@ -1002,6 +1091,76 @@ export default function TournamentDetailPage() {
           </a>
         </nav>
       </header>
+
+      {/* Dynamic Courts Section displaying currently active matches per court */}
+      <section className="mb-8">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-base font-bold text-white flex items-center gap-2">
+            <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse"></span>
+            Courts Live Status ({courtsCount} Courts)
+          </h2>
+          <span className="text-xs text-slate-400">Currently playing pairs</span>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {courtsArray.map((courtNum) => {
+            const activeMatch = currentCourtMatches[courtNum];
+
+            return (
+              <div
+                key={courtNum}
+                className={`rounded-xl border p-4 transition-all ${
+                  activeMatch
+                    ? "bg-slate-900 border-emerald-500/40 shadow-lg shadow-emerald-950/20"
+                    : "bg-slate-900/40 border-slate-800/80"
+                }`}
+              >
+                <div className="flex items-center justify-between border-b border-slate-800 pb-2 mb-3">
+                  <span className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
+                    Court {courtNum}
+                  </span>
+                  {activeMatch ? (
+                    <span className="text-[10px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-full">
+                      Slot {activeMatch.slot ?? 1}
+                    </span>
+                  ) : (
+                    <span className="text-[10px] text-slate-500">Available</span>
+                  )}
+                </div>
+
+                {activeMatch ? (
+                  <div className="space-y-2">
+                    <p className="text-[10px] text-slate-400 uppercase font-medium">
+                      {activeMatch.categoryName || "Category"} &bull;{" "}
+                      {activeMatch.group || activeMatch.stageName}
+                    </p>
+
+                    <div className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-lg border border-slate-800 text-xs font-semibold text-white">
+                      <span className="truncate">{activeMatch.teamA}</span>
+                      <span className="text-emerald-400 font-mono">
+                        {activeMatch.scoreA ?? "0"}
+                      </span>
+                    </div>
+
+                    <div className="text-center text-[10px] font-bold text-slate-500 my-0.5">VS</div>
+
+                    <div className="flex items-center justify-between bg-slate-950 px-3 py-2 rounded-lg border border-slate-800 text-xs font-semibold text-white">
+                      <span className="truncate">{activeMatch.teamB}</span>
+                      <span className="text-emerald-400 font-mono">
+                        {activeMatch.scoreB ?? "0"}
+                      </span>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="py-6 text-center text-xs text-slate-500 italic">
+                    No active match on Court {courtNum}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </section>
 
       {/* Notifications */}
       {error && (
@@ -1316,70 +1475,103 @@ export default function TournamentDetailPage() {
         </section>
       )}
 
-      {/* TAB 3: STANDINGS DASHBOARD */}
+      {/* TAB 3: STANDINGS DASHBOARD WITH CATEGORY TABS */}
       {activeTab === "standings" && (
         <section className="space-y-6">
-          <h2 className="text-lg font-bold text-white">Standings Dashboard</h2>
-          {categories.map((category) => {
-            const catMatches = matches[category.id] || [];
-            const rrMatches = catMatches.filter((m) => Boolean(m.group));
-            const groups = category.bracketGroups ?? [];
-            const standingsByGroup = calculateStandings(groups, rrMatches);
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-3 gap-3">
+            <div>
+              <h2 className="text-lg font-bold text-white">Standings Dashboard</h2>
+              <p className="text-xs text-slate-400">View real-time standings per category and group</p>
+            </div>
 
-            return (
-              <div key={category.id} className="rounded-xl border border-slate-800 bg-slate-900/40 p-4 space-y-4">
-                <h3 className="text-lg font-bold text-white border-b border-slate-800 pb-2">
-                  {category.name}
-                </h3>
+            {/* Category Tabs Selector */}
+            <div className="flex flex-wrap items-center gap-2">
+              {categories.map((cat) => (
+                <button
+                  key={cat.id}
+                  onClick={() => setActiveStandingsCatId(cat.id)}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition ${
+                    activeStandingsCatId === cat.id
+                      ? "bg-emerald-500 text-slate-950 font-bold shadow"
+                      : "bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-white"
+                  }`}
+                >
+                  {cat.name}
+                </button>
+              ))}
+            </div>
+          </div>
 
-                {Object.keys(standingsByGroup).length === 0 ? (
-                  <p className="text-xs italic text-slate-500">No round robin standings available.</p>
-                ) : (
-                  Object.entries(standingsByGroup).map(([groupName, table]) => (
-                    <div key={groupName} className="space-y-2">
-                      <h4 className="text-xs font-bold text-emerald-400 uppercase">
-                        {groupName}
-                      </h4>
-                      <div className="overflow-x-auto rounded-lg border border-slate-800">
-                        <table className="w-full text-left text-xs text-slate-300">
-                          <thead className="bg-slate-950 text-slate-400 text-[10px] uppercase">
-                            <tr>
-                              <th className="p-2">Rank</th>
-                              <th className="p-2">Team</th>
-                              <th className="p-2 text-center">P</th>
-                              <th className="p-2 text-center">W</th>
-                              <th className="p-2 text-center">L</th>
-                              <th className="p-2 text-center">D</th>
-                              <th className="p-2 text-center">PF</th>
-                              <th className="p-2 text-center">PA</th>
-                              <th className="p-2 text-center">DIFF</th>
-                              <th className="p-2 text-center font-bold text-emerald-400">PTS</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-800/60 bg-slate-900/60">
-                            {table.map((row, idx) => (
-                              <tr key={row.team} className="hover:bg-slate-800/40">
-                                <td className="p-2 font-semibold text-slate-400">{idx + 1}</td>
-                                <td className="p-2 font-semibold text-white">{row.team}</td>
-                                <td className="p-2 text-center">{row.played}</td>
-                                <td className="p-2 text-center text-emerald-400 font-semibold">{row.won}</td>
-                                <td className="p-2 text-center text-rose-400">{row.lost}</td>
-                                <td className="p-2 text-center">{row.drawn}</td>
-                                <td className="p-2 text-center">{row.pointsFor}</td>
-                                <td className="p-2 text-center">{row.pointsAgainst}</td>
-                                <td className="p-2 text-center font-semibold">{row.diff > 0 ? `+${row.diff}` : row.diff}</td>
-                                <td className="p-2 text-center font-bold text-emerald-400">{row.points}</td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
+          {categories
+            .filter((cat) => !activeStandingsCatId || cat.id === activeStandingsCatId)
+            .map((category) => {
+              const catMatches = matches[category.id] || [];
+              const rrMatches = catMatches.filter((m) => Boolean(m.group));
+              const groups = category.bracketGroups ?? [];
+              const standingsByGroup = calculateStandings(groups, rrMatches);
+
+              return (
+                <div key={category.id} className="rounded-xl border border-slate-800 bg-slate-900/40 p-5 space-y-5">
+                  <h3 className="text-xl font-bold text-white border-b border-slate-800 pb-2">
+                    {category.name}
+                  </h3>
+
+                  {Object.keys(standingsByGroup).length === 0 ? (
+                    <p className="text-xs italic text-slate-500">No round robin standings available.</p>
+                  ) : (
+                    <div className="grid gap-6 md:grid-cols-2">
+                      {Object.entries(standingsByGroup).map(([groupName, table]) => (
+                        <div key={groupName} className="space-y-2">
+                          <div className="flex justify-between items-center">
+                            <h4 className="text-xs font-bold text-emerald-400 uppercase tracking-wider">
+                              {groupName}
+                            </h4>
+                            <span className="text-[10px] text-slate-500">
+                              {table.length} Teams
+                            </span>
+                          </div>
+
+                          <div className="overflow-x-auto rounded-lg border border-slate-800">
+                            <table className="w-full text-left text-xs text-slate-300">
+                              <thead className="bg-slate-950 text-slate-400 text-[10px] uppercase">
+                                <tr>
+                                  <th className="p-2">Rank</th>
+                                  <th className="p-2">Team</th>
+                                  <th className="p-2 text-center">P</th>
+                                  <th className="p-2 text-center">W</th>
+                                  <th className="p-2 text-center">L</th>
+                                  <th className="p-2 text-center">D</th>
+                                  <th className="p-2 text-center">PF</th>
+                                  <th className="p-2 text-center">PA</th>
+                                  <th className="p-2 text-center">DIFF</th>
+                                  <th className="p-2 text-center font-bold text-emerald-400">PTS</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y divide-slate-800/60 bg-slate-900/60">
+                                {table.map((row, idx) => (
+                                  <tr key={row.team} className="hover:bg-slate-800/40">
+                                    <td className="p-2 font-semibold text-slate-400">{idx + 1}</td>
+                                    <td className="p-2 font-semibold text-white">{row.team}</td>
+                                    <td className="p-2 text-center">{row.played}</td>
+                                    <td className="p-2 text-center text-emerald-400 font-semibold">{row.won}</td>
+                                    <td className="p-2 text-center text-rose-400">{row.lost}</td>
+                                    <td className="p-2 text-center">{row.drawn}</td>
+                                    <td className="p-2 text-center">{row.pointsFor}</td>
+                                    <td className="p-2 text-center">{row.pointsAgainst}</td>
+                                    <td className="p-2 text-center font-semibold">{row.diff > 0 ? `+${row.diff}` : row.diff}</td>
+                                    <td className="p-2 text-center font-bold text-emerald-400">{row.points}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                  ))
-                )}
-              </div>
-            );
-          })}
+                  )}
+                </div>
+              );
+            })}
         </section>
       )}
 
@@ -1502,6 +1694,44 @@ export default function TournamentDetailPage() {
             )}
           </div>
         </section>
+      )}
+
+      {/* SHARE VIEWER LINK MODAL */}
+      {isShareModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 px-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white">Share Viewer Link</h3>
+              <button
+                type="button"
+                onClick={() => setIsShareModalOpen(false)}
+                className="text-xs text-slate-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Share this live public view with players and spectators. They will see live courts and standings in real-time.
+            </p>
+
+            <div className="flex items-center gap-2 bg-slate-950 p-2 rounded-xl border border-slate-800">
+              <input
+                type="text"
+                readOnly
+                value={viewerShareUrl}
+                className="w-full bg-transparent text-xs text-slate-200 outline-none px-1"
+              />
+              <button
+                type="button"
+                onClick={copyShareUrl}
+                className="bg-emerald-500 text-slate-950 font-bold text-xs px-3 py-1.5 rounded-lg hover:bg-emerald-400 transition flex-shrink-0"
+              >
+                {copiedLink ? "Copied!" : "Copy"}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Round Robin Incomplete Error Modal */}
